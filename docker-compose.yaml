@@ -1,0 +1,125 @@
+version: '3.7'
+
+services:
+  load_generator:
+    image: ysb_load_generator:latest
+    build:
+      context: ysb-load-generator
+      dockerfile: Dockerfile
+    depends_on:
+      - kafka
+      - zookeeper
+      - redis
+    environment:
+      - KAFKA_BROKER=kafka
+      - KAFKA_PORT=9092
+      - REDIS_HOST=redis
+      - KAFKA_TOPIC=ad-events
+      - KAFKA_PARTITIONS=1
+      - SKEW_ENABLED=false
+      - LOAD=10000
+  jobmanager:
+      image: flink:1.20-java11
+      ports:
+        - "8081:8081"
+        - "6123:6123"
+      command: jobmanager
+      environment:
+        - JOB_MANAGER_RPC_ADDRESS=jobmanager
+        - KAFKA_TOPIC=ad-events
+        - KAFKA_BROKER=kafka:9092
+        - ZOOKEEPER_SERVER=zookeeper:2181
+        - REDIS_HOST=redis
+        - CHECKPOINT_INTERVAL=1000
+      volumes:
+        - ./flink-benchmarks/:/tmp/flink-benchmarks
+
+  taskmanager:
+      image: flink:1.20-java11
+      command: taskmanager
+      depends_on:
+          - jobmanager
+      environment:
+        - JOB_MANAGER_RPC_ADDRESS=jobmanager
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_SERVER_ID: 1
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    hostname: kafka
+    container_name: kafka
+    restart: always
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_BROKER_ID: 1
+      KAFKA_LOG4J_LOGGERS: "kafka.controller=INFO,kafka.producer.async.DefaultEventHandler=INFO,state.change.logger=INFO"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTHORIZER_CLASS_NAME: kafka.security.authorizer.AclAuthorizer
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "true"
+    depends_on:
+      - zookeeper
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.1
+    hostname: schema-registry
+    depends_on:
+      - kafka
+    ports:
+      - "8083:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL: 'zookeeper:2181'
+      SCHEMA_REGISTRY_LISTENERS: http://schema-registry:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092,PLAINTEXT_INTERNAL://localhost:19092
+      SCHEMA_REGISTRY_DEBUG: 'true'
+  just_a_producer:
+    image: confluentinc/cp-kafka:7.3.2
+    container_name: just_a_producer
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19093,EXTERNAL://${DOCKER_HOST_IP:-127.0.0.1}:9093,DOCKER://host.docker.internal:29093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,DOCKER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_BROKER_ID: 2
+
+
+  redis:
+        image: redis:latest
+        restart: always
+        ports:
+            - "6379:6379"
+        command:
+          - redis-server
+
+
+  # Deploy Grafana prometheus stack
+  prometheus:
+      image: prom/prometheus
+      container_name: prometheus
+      ports:
+      - "9090:9090"
+      depends_on:
+      - jobmanager
+      - taskmanager
+
+  grafana:
+      image: grafana/grafana
+      container_name: grafana
+      ports:
+      - "3000:3000"
+      depends_on:
+      - prometheus
